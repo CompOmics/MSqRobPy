@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/msqrobpy/__init__.py
+src/msqrobpy/aggregation.py
+src/msqrobpy/core.py
+src/msqrobpy/design.py
+src/msqrobpy/example.py
+src/msqrobpy/hurdle.py
+src/msqrobpy/moderation.py
+src/msqrobpy/results.py
+src/msqrobpy.egg-info/PKG-INFO
+src/msqrobpy.egg-info/SOURCES.txt
+src/msqrobpy.egg-info/dependency_links.txt
+src/msqrobpy.egg-info/requires.txt
+src/msqrobpy.egg-info/top_level.txt
+tests/test_basic.py
