@@ -2,15 +2,17 @@ Metadata-Version: 2.4
 Name: msqrobpy
 Version: 0.1.0
 Summary: Python-first implementation inspired by msqrob2 for robust differential abundance analysis in LC-MS proteomics.
-Author-email: OpenAI <noreply@example.com>
-License: MIT
+Author-email: Enrico Massignani <enricomaxignani@gmail.com>
+License: LICENSE
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
+License-File: LICENSE
 Requires-Dist: numpy>=1.24
 Requires-Dist: pandas>=2.0
 Requires-Dist: scipy>=1.10
 Requires-Dist: statsmodels>=0.14
 Requires-Dist: patsy>=0.5
+Dynamic: license-file
 
 # msqrobpy
 
