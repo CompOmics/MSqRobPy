@@ -57,13 +57,46 @@ class FeatureModelResult:
         return float(np.sqrt(self.var_posterior))
 
 
+#: Ranking columns tried in order when `ContrastResult.top` is called without
+#: an explicit `sort_by`. The abundance model and the hurdle workflow report
+#: significance under different column names.
+_DEFAULT_SORT_COLUMNS = (
+    "adj_p_value",
+    "adj_combined_p_value",
+    "p_value",
+    "combined_p_value",
+)
+
+
 @dataclass
 class ContrastResult:
     """Result table for one or multiple contrasts across features."""
 
     table: pd.DataFrame
 
-    def top(self, n: int = 20, sort_by: str = "adj_p_value") -> pd.DataFrame:
+    def top(self, n: int = 20, sort_by: Optional[str] = None) -> pd.DataFrame:
+        """Return the `n` highest-ranked features.
+
+        Parameters
+        ----------
+        n:
+            Number of rows to return.
+        sort_by:
+            Column to sort on. When omitted, the first available column of
+            `_DEFAULT_SORT_COLUMNS` is used, so the same call works for
+            abundance and hurdle result tables.
+        """
+        if sort_by is None:
+            sort_by = next(
+                (c for c in _DEFAULT_SORT_COLUMNS if c in self.table.columns), None
+            )
+            if sort_by is None:
+                return self.table.head(n).copy()
+        elif sort_by not in self.table.columns:
+            raise KeyError(
+                f"Column {sort_by!r} is not in the result table. "
+                f"Available columns: {sorted(self.table.columns)}"
+            )
         return self.table.sort_values(sort_by).head(n).copy()
 
 
