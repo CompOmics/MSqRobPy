@@ -10,20 +10,262 @@ License-File: LICENSE
 Requires-Dist: numpy>=1.24
 Requires-Dist: pandas>=2.0
 Requires-Dist: scipy>=1.10
-Requires-Dist: statsmodels>=0.14
-Requires-Dist: patsy>=0.5
+Requires-Dist: statsmodels>=0.15.0
+Requires-Dist: patsy>=1.0.2
 Dynamic: license-file
 
 # msqrobpy
 
-`msqrobpy` is a Python-first, installable package inspired by the statistical design of `msqrob2` for quantitative LC-MS proteomics.
+Python-native differential abundance analysis for quantitative LC-MS proteomics, inspired by the statistical design of the Bioconductor package [`msqrob2`](https://github.com/statOmics/msqrob2).
 
-This implementation provides:
+`msqrobpy` fits a linear model per feature (protein or peptide), moderates the residual variances with an empirical Bayes procedure, and tests user-defined linear contrasts. It works directly on `pandas` DataFrames and does not reproduce the Bioconductor object model (`QFeatures`, `SummarizedExperiment`).
 
-- per-feature ordinary least squares or robust linear modeling
-- empirical-Bayes moderation of residual variances
-- linear contrast testing with multiple-testing correction
-- peptide-to-protein aggregation utilities
-- a simple hurdle workflow combining abundance and detection models
+## Features
 
-It is deliberately Python-native and does **not** attempt to reproduce the Bioconductor object model.
+- Per-feature ordinary least squares (OLS) or robust M-estimation (Huber, IRLS) regression
+- Empirical Bayes moderation of residual variances, following the `limma` `fitFDist` / `squeezeVar` approach
+- Linear contrast testing with Benjamini-Hochberg multiple-testing correction
+- Peptide-to-protein aggregation utilities
+- A hurdle workflow that combines an abundance model with a detection (logistic) model
+- Cross-validation scripts that compare the output against `msqrob2` in R
+
+## Installation
+
+Requires Python 3.10 or later.
+
+```bash
+pip install git+https://github.com/CompOmics/MSqRobPy.git
+```
+
+For development:
+
+```bash
+git clone https://github.com/CompOmics/MSqRobPy.git
+cd MSqRobPy
+pip install -e .
+```
+
+Dependencies: `numpy>=1.24`, `pandas>=2.0`, `scipy>=1.10`, `statsmodels>=0.15.0`, `patsy>=1.0.2`.
+
+### Dependency compatibility
+
+The `statsmodels` and `patsy` lower bounds are higher than the versions those packages themselves require, because older releases break on recent scientific Python stacks. An environment that predates these bounds fails as follows:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `ImportError: cannot import name '_lazywhere' from 'scipy._lib._util'` on `import msqrobpy` | `statsmodels` up to and including 0.14.4 imports a private helper that `scipy` has removed. Verified broken with scipy 1.17.1. | `pip install "statsmodels>=0.15.0"` |
+| `TypeError: Cannot interpret '<StringDtype(na_value=nan)>' as a data type` when building the design matrix | `patsy` up to and including 1.0.1 cannot handle the pandas string extension dtype, which is the default for text columns in pandas 3. | `pip install "patsy>=1.0.2"` |
+
+The first error surfaces at import time because `msqrobpy/__init__.py` imports the hurdle module, which needs `statsmodels.discrete`. It is not specific to the hurdle workflow.
+
+If upgrading is not an option, the second error can be avoided by keeping the legacy object dtype for metadata columns:
+
+```python
+import pandas as pd
+pd.set_option("future.infer_string", False)
+```
+
+A stack verified to work end to end: numpy 2.4.6, scipy 1.17.1, pandas 3.0.3, statsmodels 0.15.0, patsy 1.0.3.
+
+## Tutorial
+
+### 1. Input data
+
+`msqrobpy` expects two objects:
+
+- `intensity_df`: a feature x sample DataFrame of quantitative abundances. Values are assumed to be log-transformed and normalized. Missing values are `NaN`.
+- `sample_metadata`: a DataFrame indexed by sample name, with one column per experimental factor. Its index must cover the columns of `intensity_df`.
+
+A synthetic dataset is included for testing:
+
+```python
+from msqrobpy.example import simulate_protein_data
+
+intensity_df, sample_metadata = simulate_protein_data(
+    n_features=200,
+    n_replicates_per_group=4,
+)
+
+print(intensity_df.iloc[:3, :4].round(2))
+#        S1     S2     S3     S4
+# P1  24.38  25.43  25.25  25.44
+# P2  25.71  24.79  25.29  25.72
+# P3  24.60  24.75  24.30  23.97
+
+print(sample_metadata.head(3))
+#    condition
+# S1   control
+# S2   control
+# S3   control
+```
+
+### 2. Fit the models
+
+`fit_protein_model` fits one linear model per row of `intensity_df`. The model is specified with a `patsy` formula referring to columns of `sample_metadata`.
+
+```python
+from msqrobpy import fit_protein_model
+
+fit = fit_protein_model(
+    intensity_df,
+    sample_metadata,
+    formula="~ condition",
+    robust=True,            # Huber M-estimation; set False for OLS
+    empirical_bayes=True,   # moderate residual variances across features
+)
+
+print(fit.design_columns)
+# ['Intercept', 'condition[T.treated]']
+```
+
+Features with fewer observed values than model parameters are skipped. Fitted coefficients are available as a feature x coefficient table:
+
+```python
+fit.coefficients().head()
+```
+
+### 3. Test a contrast
+
+A contrast is a linear combination of design matrix columns. Pass the coefficient name directly, or an arithmetic expression over coefficient names.
+
+```python
+res = fit.test_contrast("condition[T.treated]")
+
+print(res.top(5).round(4).to_string(index=False))
+# feature_id             contrast  estimate  std_error  t_stat  df  p_value  sigma  sigma_posterior method  adj_p_value
+#        P74 condition[T.treated]    1.8037     0.3179  5.6746 inf      0.0 0.4136           0.4482    rlm       0.0000
+#        P66 condition[T.treated]    1.6577     0.3257  5.0895 inf      0.0 0.5738           0.4482    rlm       0.0000
+#        P56 condition[T.treated]    1.5946     0.3258  4.8941 inf      0.0 0.3382           0.4482    rlm       0.0001
+#       P151 condition[T.treated]    1.5915     0.3359  4.7376 inf      0.0 0.3104           0.4482    rlm       0.0001
+#        P41 condition[T.treated]    1.3777     0.3169  4.3473 inf      0.0 0.1939           0.4482    rlm       0.0006
+
+significant = res.table[res.table["adj_p_value"] < 0.05]
+print(len(significant))
+# 14
+```
+
+`res.table` is a plain DataFrame with these columns:
+
+| Column | Meaning |
+|---|---|
+| `feature_id` | Row label from `intensity_df` |
+| `contrast` | Contrast name |
+| `estimate` | Contrast estimate (log fold change on the input scale) |
+| `std_error` | Standard error, using the moderated variance when available |
+| `t_stat` | Moderated t-statistic |
+| `df` | Posterior residual degrees of freedom (`inf` when the prior df is infinite) |
+| `p_value` | Two-sided p-value |
+| `adj_p_value` | Benjamini-Hochberg adjusted p-value |
+| `sigma`, `sigma_posterior` | Raw and moderated residual standard deviation |
+| `method` | `ols` or `rlm` |
+
+### 4. Multi-factor designs and contrast arithmetic
+
+Add covariates to the formula and combine coefficients in the contrast expression:
+
+```python
+fit = fit_protein_model(intensity_df, sample_metadata, "~ condition + batch", robust=True)
+print(fit.design_columns)
+# ['Intercept', 'condition[T.B]', 'condition[T.C]', 'batch[T.b2]']
+
+res = fit.test_contrast("condition[T.C] - condition[T.B]", name="C_vs_B")
+res.top(3)
+```
+
+A contrast may also be given as a `pandas.Series` indexed by design column names, which is convenient for programmatically generated contrasts.
+
+lme4-style random effect terms such as `(1 | run)` are stripped from the formula before the design matrix is built. Mixed models are not fitted; only the fixed-effect part is used.
+
+### 5. Peptide-to-protein aggregation
+
+If the input is a long peptide table, aggregate it to a protein x sample matrix first:
+
+```python
+import pandas as pd
+from msqrobpy import aggregate_peptides
+
+long_df = pd.DataFrame({
+    "protein":   ["P1", "P1", "P1", "P1", "P2", "P2"],
+    "peptide":   ["pepA", "pepB", "pepA", "pepB", "pepC", "pepC"],
+    "sample":    ["S1", "S1", "S2", "S2", "S1", "S2"],
+    "intensity": [20.1, 19.8, 21.3, 21.0, 18.4, 18.9],
+})
+
+protein_df = aggregate_peptides(
+    long_df,
+    protein_col="protein",
+    peptide_col="peptide",
+    sample_col="sample",
+    intensity_col="intensity",
+    min_peptides=2,          # drop proteins with fewer distinct peptides
+)
+print(protein_df)
+# sample      S1     S2
+# protein
+# P1       19.95  21.15
+```
+
+The default summary is the median (`robust_summary`). Pass any callable through `summary_func` to replace it.
+
+### 6. Hurdle model
+
+`fit_hurdle_model` fits the abundance model on observed intensities and, in parallel, a logistic regression on the detection pattern (observed versus missing). Evidence from both components is combined with Stouffer's method.
+
+```python
+from msqrobpy import fit_hurdle_model
+
+hurdle = fit_hurdle_model(intensity_df, sample_metadata, "~ condition", robust=True)
+res = hurdle["test_contrast"]("condition[T.treated]")
+
+print(res.top(3).round(3).to_string(index=False))
+# feature_id             contrast  abundance_estimate  abundance_p_value  detection_estimate  detection_p_value  combined_z  combined_p_value  adj_combined_p_value
+#        P30 condition[T.treated]               1.812                0.0             -23.132                1.0       3.462             0.001                 0.054
+#        P88 condition[T.treated]               1.659                0.0             -23.132                1.0       3.171             0.002                 0.076
+#        P40 condition[T.treated]               1.648                0.0             -24.230                1.0       2.979             0.003                 0.096
+```
+
+The returned dictionary holds `abundance_fit`, `detection_models`, and the `test_contrast` callable. The result table reports `abundance_estimate`, `detection_estimate`, their p-values, and `combined_p_value` with a BH-adjusted counterpart.
+
+`ContrastResult.top()` ranks the hurdle table on `adj_combined_p_value`, because the abundance-model column `adj_p_value` is absent here. Pass `sort_by` to rank on any other column. Features whose detection pattern is constant across samples are dropped from the detection component and reported on the abundance evidence alone. A perfectly separated detection pattern makes the logistic fit diverge, which produces large `detection_estimate` values with uninformative p-values, as in the rows above.
+
+## API reference
+
+| Object | Purpose |
+|---|---|
+| `fit_protein_model(intensity_df, sample_metadata, formula, robust=True, empirical_bayes=True, feature_axis=0, maxiter=5)` | Fit per-feature models; returns a `ProteinModelFit` |
+| `ProteinModelFit.test_contrast(contrast, name=None)` | Test a contrast; returns a `ContrastResult` |
+| `ProteinModelFit.coefficients()` | Feature x coefficient DataFrame |
+| `ContrastResult.table` / `.top(n, sort_by)` | Full result table / top-ranked features |
+| `fit_hurdle_model(...)` | Combined abundance and detection workflow |
+| `aggregate_peptides(...)`, `robust_summary(...)` | Peptide-to-protein summarization |
+| `FeatureModelResult` | Per-feature coefficients, unscaled covariance, sigma, df, weights |
+
+Set `feature_axis=1` when features are in columns rather than rows.
+
+## Implementation notes
+
+- Robust fitting uses Huber M-estimation with tuning constant `k = 1.345` and a MAD-based scale re-estimated at each IRLS iteration. The default of 5 iterations matches the `msqrobLm` default in `msqrob2`.
+- The unscaled covariance matrix is `(X'WX)^-1`, matching `.vcovUnscaled()` in `msqrob2`. For robust fits, the residual degrees of freedom are `sum(weights) - rank`.
+- Variance moderation follows `limma`: the centred log-variances are used to isolate the prior trigamma term, which is inverted to recover the prior degrees of freedom `d0` and prior variance `s0^2`. When the estimated between-feature variance is non-positive, `d0` is set to infinity and the moderated t-statistic is referred to a normal distribution.
+
+## Validating against msqrob2
+
+The `tests/cross_validation/` directory contains scripts that run both implementations on the same synthetic dataset and compare the output:
+
+```bash
+cd tests/cross_validation
+python run_all.py
+```
+
+This requires R with `msqrob2` installed (`BiocManager::install("msqrob2")`). Regression coefficients, residual sigma, degrees of freedom, unscaled covariance matrices, and contrast estimates are expected to agree within 5%. Empirical Bayes quantities and the statistics derived from them are compared at a 20% tolerance, because the prior estimation strategies differ. See `tests/cross_validation/README.md` for details.
+
+## Tests
+
+```bash
+pip install pytest
+pytest tests/test_basic.py
+```
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
